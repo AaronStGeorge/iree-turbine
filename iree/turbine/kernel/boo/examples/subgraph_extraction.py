@@ -12,6 +12,8 @@ from iree.turbine.kernel.boo.fusion import (
     OpFusionSpec,
 )
 from torch._functorch.aot_autograd import aot_export_joint_simple
+from torch.fx import subgraph_rewriter
+from torch.fx.passes.utils.matcher_utils import SubgraphMatcher
 
 from iree.turbine.kernel.boo.ops import get_custom_graph_op
 
@@ -57,6 +59,24 @@ def main():
 
     gm.print_readable()
 
+    def pattern(input, weight, bias):
+        x = torch.ops.aten.conv2d.default(input, weight, bias)
+        return torch.ops.aten.relu.default(x)
+
+    pattern_gm = torch.fx.symbolic_trace(pattern)
+
+    matcher = SubgraphMatcher(pattern_gm.graph)
+    matches = matcher.match(gm.graph)
+
+    print(f"Found {len(matches)} matches:\n")
+    for i, match in enumerate(matches):
+        print(f"Match {i + 1}:")
+        print(f"  Anchor node: {match.anchors}")
+        print(f"  Nodes in pattern:")
+        for pattern_node, target_node in match.nodes_map.items():
+            print(f"    {pattern_node.op}:{pattern_node.target} -> {target_node}")
+        print()
+
     schema: FusionSchema = {
         torch.ops.aten.conv2d.default: OpFusionSpec(
             recursive=True, producers=(), consumers=(torch.ops.aten.relu.default,)
@@ -71,34 +91,34 @@ def main():
     subgraphs, _ = extract_fusion_subgraph_modules(gm, schema)
     subgraph_ops = []
     subgraph_repl = []
-    for sg in subgraphs:
+    for i, sg in enumerate(subgraphs):
         fake_args = tuple(
             [n.meta.get("val") for n in sg.graph.nodes if n.op == "placeholder"]
         )
-        sg.print_readable()
-        # joint_sg = aot_export_joint_simple(sg.forward, args=fake_args, trace_joint=True)
-        # joint_sg.print_readable()
-        # fake_args_joint = tuple(
-        # [n.meta.get("val") for n in joint_sg.graph.nodes if n.op == "placeholder"]
-        # )
-        # outputs = [n.all_input_nodes for n in joint_sg.graph.nodes if n.op == "output"][0]
-        # custom_op = make_autograd_function(joint_sg, fake_args_joint, num_fwd_outputs=len(outputs))
-        # subgraph_ops.append(custom_op)
-        custom_op = get_custom_graph_op(sg)
-        subgraph_ops.append(custom_op)
+        print(f"subgraph: {i} {sg.print_readable()}")
+    #     # joint_sg = aot_export_joint_simple(sg.forward, args=fake_args, trace_joint=True)
+    #     # joint_sg.print_readable()
+    #     # fake_args_joint = tuple(
+    #     # [n.meta.get("val") for n in joint_sg.graph.nodes if n.op == "placeholder"]
+    #     # )
+    #     # outputs = [n.all_input_nodes for n in joint_sg.graph.nodes if n.op == "output"][0]
+    #     # custom_op = make_autograd_function(joint_sg, fake_args_joint, num_fwd_outputs=len(outputs))
+    #     # subgraph_ops.append(custom_op)
+    #     custom_op = get_custom_graph_op(sg)
+    #     subgraph_ops.append(custom_op)
 
-        class FakeMod(torch.nn.Module):
-            def forward(self, *args):
-                return custom_op(*args)
+    #     class FakeMod(torch.nn.Module):
+    #         def forward(self, *args):
+    #             return custom_op(*args)
 
-        e = torch.export.export(FakeMod(), args=fake_args)
-        subgraph_repl.append(e.graph_module)
+    #     e = torch.export.export(FakeMod(), args=fake_args)
+    #     subgraph_repl.append(e.graph_module)
 
-    _ = replace_subgraphs(gm, subgraphs, subgraph_repl)
+    # _ = replace_subgraphs(gm, subgraphs, subgraph_repl)
 
-    print(exported_program)
+    # print(exported_program)
 
-    print(exported_program.module()(*sample_inputs))
+    # print(exported_program.module()(*sample_inputs))
 
 
 if __name__ == "__main__":
